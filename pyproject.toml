@@ -1,0 +1,13 @@
+[project]
+name = "rag-fastapi-eval"
+version = "0.1.0"
+description = "Ask questions about the FastAPI framework and get answers with sources, plus an evaluation harness that measures how often those answers are actually correct and how often they are made up."
+readme = "README.md"
+authors = [
+    { name = "shaurmittal", email = "shaurmittal@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
