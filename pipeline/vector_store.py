@@ -4,11 +4,13 @@ Nothing outside this file imports qdrant_client. Retrieval, evaluation and
 the app all talk to VectorStore's four methods, so swapping Qdrant for
 another store means rewriting this file and nothing else.
 
-Two ways to connect, chosen by environment:
-  QDRANT_URL set    -> a Qdrant server (the Docker container, locally)
-  QDRANT_URL unset  -> Qdrant's embedded mode, reading from data/qdrant_local/
-                       No server at all - this is what the deployed app uses,
-                       since Streamlit Cloud can't reach a container on a laptop.
+Three ways to connect, chosen by environment:
+  QDRANT_URL set          -> a Qdrant server (the Docker container, locally)
+  data/qdrant_local/ here -> Qdrant's embedded on-disk mode, no server
+  neither                 -> an in-memory store loaded from the portable
+                             export in data/index/. This is what the deployed
+                             app uses: Streamlit Cloud can't reach a container
+                             on a laptop.
 
 Each chunking strategy gets its own collection (fastapi_naive,
 fastapi_structured) so the two indexes never mix.
@@ -33,7 +35,16 @@ def collection_name(strategy):
 class VectorStore:
     def __init__(self, url=None, path=None):
         url = url or os.getenv("QDRANT_URL")
-        self.client = QdrantClient(url=url) if url else QdrantClient(path=path or LOCAL_PATH)
+        path = path or LOCAL_PATH
+        if url:
+            self.client = QdrantClient(url=url)
+        elif os.path.isdir(path):
+            self.client = QdrantClient(path=path)
+        else:
+            from pipeline.index import load_export
+
+            self.client = QdrantClient(":memory:")
+            load_export(self)
 
     def recreate(self, collection, dimensions):
         """Drop and recreate a collection, so re-indexing starts clean."""
@@ -68,3 +79,17 @@ class VectorStore:
 
     def count(self, collection):
         return self.client.count(collection).count
+
+    def dump(self, collection):
+        """Every chunk and its vector, in chunk-id order (for export)."""
+        chunks, vectors, offset = [], [], None
+        while True:
+            points, offset = self.client.scroll(collection, limit=512, offset=offset,
+                                                with_payload=True, with_vectors=True)
+            for p in points:
+                chunks.append(Chunk(**p.payload))
+                vectors.append(p.vector)
+            if offset is None:
+                break
+        order = sorted(range(len(chunks)), key=lambda i: chunks[i].id)
+        return [chunks[i] for i in order], [vectors[i] for i in order]

@@ -65,7 +65,13 @@ def evaluate(config, example, generate_answers):
         result, generated = answer(example["question"], config)
         row.update(score_generation(example, result.hits[: config.k_context], generated))
         row["answer"] = generated.text
-        row["cost_usd"] = generated.cost_usd
+        row["answer_model"] = generated.model
+        row["citations"] = [c.__dict__ for c in generated.citations]
+        # The exact context the answer was generated from, for audit and human labelling.
+        row["context"] = [{"source_file": h.chunk.source_file, "text": h.chunk.text}
+                          for h in result.hits[: config.k_context]]
+        row["generation_cost_usd"] = generated.cost_usd
+        row["cost_usd"] = generated.cost_usd + row["judge_cost_usd"]
     else:
         result = search(example["question"], config)
 
@@ -93,7 +99,7 @@ def summarize(rows, metrics):
     out.append("## Mean scores\n")
     out.append(table(
         ["config"] + metrics,
-        [[name] + [f"{mean([r[m] for r in rs]):.3f}" for m in metrics] for name, rs in by_config.items()],
+        [[name] + [f"{mean([r.get(m) for r in rs]):.3f}" for m in metrics] for name, rs in by_config.items()],
     ))
 
     # 2. The same, sliced by where the answer lives.
@@ -103,7 +109,7 @@ def summarize(rows, metrics):
         out.append(f"\n## {qtype}-answerable questions only (n={size})\n")
         out.append(table(
             ["config"] + metrics,
-            [[name] + [f"{mean([r[m] for r in rs]):.3f}" for m in metrics] for name, rs in subset.items()],
+            [[name] + [f"{mean([r.get(m) for r in rs]):.3f}" for m in metrics] for name, rs in subset.items()],
         ))
 
     # 3. Paired comparisons, one factor at a time.
@@ -118,8 +124,13 @@ def summarize(rows, metrics):
     rows_out = []
     for a, b, label in pairs:
         for m in metrics:
-            xa = [r[m] for r in by_config[a]]
-            xb = [r[m] for r in by_config[b]]
+            # Compare only questions where both configs have a defined score
+            # (faithfulness is undefined for answers that make no claims).
+            both = [(ra[m], rb[m]) for ra, rb in zip(by_config[a], by_config[b])
+                    if ra.get(m) is not None and rb.get(m) is not None]
+            if not both:
+                continue
+            xa, xb = [x for x, _ in both], [y for _, y in both]
             w, l, t = paired_record(xa, xb)
             lo, hi = bootstrap_ci(xa, xb)
             verdict = "better" if lo > 0 else "worse" if hi < 0 else "no clear difference"

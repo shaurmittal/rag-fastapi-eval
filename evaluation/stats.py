@@ -38,6 +38,9 @@ def bootstrap_ci(a, b, n_resamples=10_000, seed=0):
 
 
 def mean(values):
+    """Mean of the defined values. None marks a metric that doesn't apply to a
+    question (e.g. faithfulness of an answer with no claims) and is skipped."""
+    values = [v for v in values if v is not None]
     return sum(values) / len(values) if values else float("nan")
 
 
