@@ -27,8 +27,13 @@ MODEL = "claude-opus-5"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 # USD per million tokens (input, output). Cache reads/writes are priced
-# relative to input. Used to report cost per question and per sweep.
-PRICES = {"claude-opus-5": (5.00, 25.00), "claude-opus-4-8": (5.00, 25.00)}
+# relative to input; the Batch API halves everything. Used to report cost
+# per question and per sweep.
+PRICES = {
+    "claude-opus-5": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-sonnet-5": (2.00, 10.00),
+}
 
 SYSTEM_PROMPT = """You answer developer questions about the FastAPI web framework (version 0.115.0).
 
@@ -83,16 +88,17 @@ def build_documents(hits):
     ]
 
 
-def cost(usage, model):
+def cost(usage, model, batch=False):
     price_in, price_out = PRICES.get(model, PRICES[MODEL])
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    return (
+    total = (
         usage.input_tokens * price_in
         + cache_read * price_in * 0.1
         + cache_write * price_in * 1.25
         + usage.output_tokens * price_out
     ) / 1_000_000
+    return total * 0.5 if batch else total
 
 
 def parse_response(response, hits):
@@ -115,27 +121,28 @@ def parse_response(response, hits):
     return "".join(parts).strip(), citations, (cited_blocks / text_blocks if text_blocks else 0.0)
 
 
-def generate(question, hits):
-    """Answer `question` from the retrieved `hits`, with citations."""
-    response = client().beta.messages.create(
-        model=MODEL,
-        max_tokens=16000,
-        system=SYSTEM_PROMPT,
-        messages=[{
+def request_params(question, hits):
+    """The Messages API request for one answer. Shared by the live call and
+    the batch runner, so both paths send exactly the same prompt."""
+    return {
+        "model": MODEL,
+        "max_tokens": 16000,
+        "system": SYSTEM_PROMPT,
+        "messages": [{
             "role": "user",
             "content": build_documents(hits) + [{"type": "text", "text": question}],
         }],
-        betas=[FALLBACK_BETA],
-        fallbacks="default",
-    )
+    }
 
+
+def answer_from_message(response, hits, batch=False):
+    """Turn an API response into an Answer."""
+    spent = cost(response.usage, response.model, batch)
     if response.stop_reason == "refusal":
-        # Every model in the fallback chain declined. Record it; don't crash the sweep.
+        # Every model in the fallback chain (if any) declined. Record it; don't crash the sweep.
         return Answer(text="", stop_reason="refusal", model=response.model,
                       input_tokens=response.usage.input_tokens,
-                      output_tokens=response.usage.output_tokens,
-                      cost_usd=cost(response.usage, response.model))
-
+                      output_tokens=response.usage.output_tokens, cost_usd=spent)
     text, citations, cited_share = parse_response(response, hits)
     return Answer(
         text=text,
@@ -144,6 +151,16 @@ def generate(question, hits):
         model=response.model,
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
-        cost_usd=cost(response.usage, response.model),
+        cost_usd=spent,
         cited_block_share=cited_share,
     )
+
+
+def generate(question, hits):
+    """Answer `question` from the retrieved `hits`, with citations (live call)."""
+    response = client().beta.messages.create(
+        **request_params(question, hits),
+        betas=[FALLBACK_BETA],
+        fallbacks="default",
+    )
+    return answer_from_message(response, hits)

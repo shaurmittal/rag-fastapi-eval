@@ -18,12 +18,12 @@ LLM-AS-JUDGE
     - A frozen, versioned prompt. Changing it invalidates earlier numbers, so
       every row records JUDGE_VERSION.
 
-    Two limitations are reported rather than hidden. The judge is the same
-    model family as the generator (self-preference bias is possible), and
-    Claude Opus 5 does not accept a temperature setting, so the judge cannot
-    be pinned to greedy decoding. evaluation/judge_validation.py measures
-    both concerns empirically: agreement with human labels, and agreement
-    with itself on a re-run.
+    The judge is Claude Sonnet 5 while answers come from Claude Opus 5. A
+    judge that isn't the generating model reduces self-preference bias (models
+    rate their own outputs higher), and costs less. Neither model accepts a
+    temperature setting, so the judge can't be pinned to greedy decoding.
+    evaluation/judge_validation.py measures how much that matters: agreement
+    with blind human labels, and agreement with itself on a re-run.
 
 DETERMINISTIC METRICS (no LLM)
     has_citation            whether the answer cites any retrieved passage
@@ -40,15 +40,19 @@ DETERMINISTIC METRICS (no LLM)
     chunks naturally don't state - so faithfulness was measuring boilerplate
     coverage, not hallucination. Found by reading smoke-test items, fixed
     before the full run, applied to every configuration.
+
+    Judge revision 2026-09-24.3: judge model changed from Claude Opus 5 to
+    Claude Sonnet 5 (different model from the generator; fits the budget),
+    before the full run.
 """
 
 import anthropic
 from pydantic import BaseModel, Field
 
-from pipeline.generate import FALLBACK_BETA, cost
+from pipeline.generate import cost
 
-JUDGE_MODEL = "claude-opus-5"
-JUDGE_VERSION = "2026-09-24.2"
+JUDGE_MODEL = "claude-sonnet-5"
+JUDGE_VERSION = "2026-09-24.3"
 
 
 class Claims(BaseModel):
@@ -131,19 +135,27 @@ def client():
 
 
 def judge(prompt, schema):
-    """One structured judge call. Returns (parsed_output or None, cost_usd)."""
-    response = client().beta.messages.parse(
+    """One live structured judge call. Returns (parsed_output or None, cost_usd)."""
+    response = client().messages.parse(
         model=JUDGE_MODEL,
         max_tokens=16000,
         messages=[{"role": "user", "content": prompt}],
         output_format=schema,
-        betas=[FALLBACK_BETA],
-        fallbacks="default",
     )
     spent = cost(response.usage, response.model)
     if response.stop_reason == "refusal":
         return None, spent
     return response.parsed_output, spent
+
+
+def batch_params(prompt, schema):
+    """The same judge request as `judge`, in Batch API form (raw JSON schema)."""
+    return {
+        "model": JUDGE_MODEL,
+        "max_tokens": 16000,
+        "messages": [{"role": "user", "content": prompt}],
+        "output_config": {"format": {"type": "json_schema", "schema": anthropic.transform_schema(schema)}},
+    }
 
 
 def format_context(hits):
@@ -153,49 +165,64 @@ def format_context(hits):
     )
 
 
-def score_generation(example, hits, generated):
-    """All generation metrics for one answer, plus the details needed to audit them."""
+def decompose_prompt(example, answer_text):
+    return DECOMPOSE_PROMPT.format(question=example["question"], answer=answer_text)
+
+
+def verify_prompt(hits, claims):
+    return VERIFY_PROMPT.format(context=format_context(hits), claims="\n".join(f"- {c}" for c in claims))
+
+
+def answer_prompt(example, answer_text):
+    return ANSWER_PROMPT.format(question=example["question"], answer=answer_text,
+                                reference=example["expected_answer"])
+
+
+def finalize(example, generated, verdicts, judged, judge_cost):
+    """Turn judge outputs into the metrics row. Shared by live and batch runs.
+
+    verdicts: list of ClaimVerdict (empty if the answer made no claims)
+    judged:   AnswerJudgement, or None if that judge call failed
+    """
     expected = set(example["expected_sources"])
     cited = [c.source_file for c in generated.citations]
     row = {
+        "judge_model": JUDGE_MODEL,
         "judge_version": JUDGE_VERSION,
         "has_citation": float(bool(generated.citations)),
         # Undefined (None) when the answer cites nothing; excluded from means.
         "cited_source_precision": (sum(s in expected for s in cited) / len(cited)) if cited else None,
         "refused": generated.stop_reason == "refusal",
+        "judge_cost_usd": judge_cost,
     }
-    judge_cost = 0.0
-
     if not generated.text:
-        row.update(faithfulness=None, relevance=0.0, correctness=0.0, claims=[], judge_cost_usd=0.0)
+        row.update(faithfulness=None, relevance=0.0, correctness=0.0, claims=[], judge_reasoning=None)
         return row
-
-    # Faithfulness: decompose, then verify each claim against the context.
-    decomposed, spent = judge(DECOMPOSE_PROMPT.format(question=example["question"], answer=generated.text), Claims)
-    judge_cost += spent
-    claims = decomposed.claims if decomposed else []
-    verdicts = []
-    if claims:
-        verified, spent = judge(
-            VERIFY_PROMPT.format(context=format_context(hits), claims="\n".join(f"- {c}" for c in claims)),
-            Verification,
-        )
-        judge_cost += spent
-        verdicts = verified.verdicts if verified else []
     # An answer with no factual claims (e.g. "the docs don't cover this") is
     # neither faithful nor unfaithful - it's excluded from the faithfulness mean.
     row["faithfulness"] = (sum(v.supported for v in verdicts) / len(verdicts)) if verdicts else None
     row["claims"] = [v.model_dump() for v in verdicts]
-
-    # Relevance and correctness, judged against the question and the reference answer.
-    judged, spent = judge(
-        ANSWER_PROMPT.format(question=example["question"], answer=generated.text,
-                             reference=example["expected_answer"]),
-        AnswerJudgement,
-    )
-    judge_cost += spent
     row["relevance"] = float(judged.addresses_question) if judged else None
     row["correctness"] = float(judged.consistent_with_reference) if judged else None
     row["judge_reasoning"] = judged.model_dump() if judged else None
-    row["judge_cost_usd"] = judge_cost
     return row
+
+
+def score_generation(example, hits, generated):
+    """All generation metrics for one answer, judged with live API calls."""
+    if not generated.text:
+        return finalize(example, generated, [], None, 0.0)
+
+    decomposed, spent = judge(decompose_prompt(example, generated.text), Claims)
+    judge_cost = spent
+    claims = decomposed.claims if decomposed else []
+
+    verdicts = []
+    if claims:
+        verified, spent = judge(verify_prompt(hits, claims), Verification)
+        judge_cost += spent
+        verdicts = verified.verdicts if verified else []
+
+    judged, spent = judge(answer_prompt(example, generated.text), AnswerJudgement)
+    judge_cost += spent
+    return finalize(example, generated, verdicts, judged, judge_cost)

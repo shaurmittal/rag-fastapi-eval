@@ -123,6 +123,7 @@ def label():
 def retest():
     from evaluation.generation_metrics import (ANSWER_PROMPT, VERIFY_PROMPT, AnswerJudgement,
                                                Verification, judge)
+    # The retest re-uses the exact prompts the judge was scored with.
     items = load()
     for n, item in enumerate(items, 1):
         if "judge_retest" in item:
