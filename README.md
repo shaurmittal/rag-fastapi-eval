@@ -1,6 +1,6 @@
 # RAG over FastAPI — with a Rigorous Eval Harness
 
-Ask questions about the [FastAPI](https://github.com/tiangolo/fastapi) framework and
+Ask questions about the [FastAPI](https://github.com/fastapi/fastapi) framework and
 get answers with citations — plus an evaluation harness that measures how often those
 answers are actually correct, and how often they are made up.
 
@@ -40,7 +40,7 @@ Evaluation numbers are only meaningful against a frozen corpus, so the source is
 
 | | |
 |---|---|
-| Repository | `tiangolo/fastapi` |
+| Repository | `fastapi/fastapi` |
 | Tag | `v0.115.0` |
 | Commit | `40e33e4` |
 | Docs indexed | `docs/en/docs/` — English only (the repo ships 26 translations; indexing all of them would flood retrieval with near-duplicate chunks) |
@@ -69,7 +69,7 @@ docker compose up -d
 
 # 3. Fetch the pinned corpus
 git clone --depth 1 --branch 0.115.0 \
-    https://github.com/tiangolo/fastapi.git data/raw/fastapi
+    https://github.com/fastapi/fastapi.git data/raw/fastapi
 
 # 4. Configure credentials
 cp .env.example .env    # then fill in GITHUB_TOKEN and ANTHROPIC_API_KEY

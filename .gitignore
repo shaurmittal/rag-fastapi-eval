@@ -4,4 +4,8 @@ __pycache__/
 *.pyc
 data/raw/
 qdrant_storage/
-.DS_Store
+.DS_Store# Derived artifacts - regenerable from committed inputs
+data/chunks/
+data/eval_candidates.jsonl
+data/qdrant_local/
+data/runs/
