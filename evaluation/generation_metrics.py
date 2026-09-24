@@ -26,8 +26,20 @@ LLM-AS-JUDGE
     with itself on a re-run.
 
 DETERMINISTIC METRICS (no LLM)
-    citation_coverage       share of answer text blocks that carry a citation
+    has_citation            whether the answer cites any retrieved passage
     cited_source_precision  share of citations pointing into an expected source
+
+    Citation coverage by block was dropped: native citations attach to quoted
+    passages, and the model writes the connecting prose and code between them
+    as separate uncited blocks, so the share of cited blocks sits near 0.5 by
+    construction. Uncited claims are what faithfulness catches.
+
+    Judge revision 2026-09-24.2: the first decomposition prompt asked for
+    claims made by code examples, and extracted ~19 claims per answer,
+    mostly boilerplate ("FastAPI is imported from fastapi") that retrieved
+    chunks naturally don't state - so faithfulness was measuring boilerplate
+    coverage, not hallucination. Found by reading smoke-test items, fixed
+    before the full run, applied to every configuration.
 """
 
 import anthropic
@@ -36,7 +48,7 @@ from pydantic import BaseModel, Field
 from pipeline.generate import FALLBACK_BETA, cost
 
 JUDGE_MODEL = "claude-opus-5"
-JUDGE_VERSION = "2026-09-24.1"
+JUDGE_VERSION = "2026-09-24.2"
 
 
 class Claims(BaseModel):
@@ -60,11 +72,17 @@ class AnswerJudgement(BaseModel):
     consistent_with_reference: bool
 
 
-DECOMPOSE_PROMPT = """Break the answer below into atomic factual claims about FastAPI or Python behaviour.
+DECOMPOSE_PROMPT = """Extract the factual claims this answer makes that bear on the question it answers.
 
-An atomic claim is a single assertion that can be checked on its own, e.g. "include_in_schema=False excludes a parameter from the OpenAPI schema". Split compound sentences. Include claims made by code examples (which function is called, which parameter is passed). Leave out hedges, greetings, and statements that the documentation doesn't cover something.
+Include statements about FastAPI's behaviour, APIs and parameters, and what the answer's code example demonstrates about solving the problem (for example, "passing include_in_schema=False to Query hides the parameter from the OpenAPI schema"). Make each claim a single assertion that can be checked on its own.
 
-If the answer makes no factual claims, return an empty list.
+Leave out boilerplate that any FastAPI program contains - imports, creating the app, generic Python syntax like `async def` or type annotations - as well as hedges and statements that the documentation doesn't cover something. Prefer a few meaningful claims over many trivial ones.
+
+If the answer makes no such claims, return an empty list.
+
+<question>
+{question}
+</question>
 
 <answer>
 {answer}
@@ -141,7 +159,7 @@ def score_generation(example, hits, generated):
     cited = [c.source_file for c in generated.citations]
     row = {
         "judge_version": JUDGE_VERSION,
-        "citation_coverage": generated.cited_block_share,
+        "has_citation": float(bool(generated.citations)),
         # Undefined (None) when the answer cites nothing; excluded from means.
         "cited_source_precision": (sum(s in expected for s in cited) / len(cited)) if cited else None,
         "refused": generated.stop_reason == "refusal",
@@ -153,7 +171,7 @@ def score_generation(example, hits, generated):
         return row
 
     # Faithfulness: decompose, then verify each claim against the context.
-    decomposed, spent = judge(DECOMPOSE_PROMPT.format(answer=generated.text), Claims)
+    decomposed, spent = judge(DECOMPOSE_PROMPT.format(question=example["question"], answer=generated.text), Claims)
     judge_cost += spent
     claims = decomposed.claims if decomposed else []
     verdicts = []

@@ -37,7 +37,7 @@ CONFIGS = [
 ]
 
 RETRIEVAL_METRICS = ["hit@1", "hit@5", "recall@5", "recall@10", "precision@5", "mrr@10"]
-GENERATION_METRICS = ["faithfulness", "relevance", "correctness", "citation_coverage", "cited_source_precision"]
+GENERATION_METRICS = ["faithfulness", "relevance", "correctness", "has_citation", "cited_source_precision"]
 
 
 def load_golden(original_labels=False):
@@ -79,6 +79,27 @@ def evaluate(config, example, generate_answers):
     row["retrieved_sources"] = [h.chunk.source_file for h in result.hits]
     row.update({f"latency_{stage}": secs for stage, secs in result.timings.items()})
     return row
+
+
+def rescore(row, example):
+    """Re-judge a stored answer with the current judge, without regenerating it.
+
+    Retrieval metrics, latencies, and generation cost are kept from the
+    original row; only the generation metrics and judge cost are recomputed.
+    """
+    from evaluation.generation_metrics import score_generation
+    from ingest.chunk import Chunk
+    from pipeline.generate import Answer, Citation
+    from pipeline.retrieve import Hit
+
+    hits = [Hit(Chunk(id="", text=c["text"], source_file=c["source_file"], section="",
+                      chunk_type="", strategy=""), 0.0) for c in row["context"]]
+    stored = Answer(text=row["answer"], citations=[Citation(**c) for c in row["citations"]],
+                    stop_reason="refusal" if row.get("refused") else "end_turn")
+    new = dict(row)
+    new.update(score_generation(example, hits, stored))
+    new["cost_usd"] = row["generation_cost_usd"] + new["judge_cost_usd"]
+    return new
 
 
 def table(headers, rows):
@@ -164,6 +185,7 @@ def main():
     parser.add_argument("--generate", action="store_true", help="also generate answers and judge them (needs ANTHROPIC_API_KEY)")
     parser.add_argument("--limit", type=int, default=None, help="only the first N questions (smoke test)")
     parser.add_argument("--original-labels", action="store_true", help="score against first-pass labels, without pooled additions")
+    parser.add_argument("--rescore", metavar="RUN_DIR", help="re-judge the answers stored in a previous --generate run")
     args = parser.parse_args()
 
     golden = load_golden(args.original_labels)[: args.limit]
@@ -175,8 +197,22 @@ def main():
 
     rows = []
     started = time.perf_counter()
-    with open(run_dir / "per_question.jsonl", "w") as f:
-        for config in CONFIGS:
+    if args.rescore:
+        golden_by_id = {g["id"]: g for g in golden}
+        old = [json.loads(line) for line in open(Path(args.rescore) / "per_question.jsonl")]
+        with open(run_dir / "per_question.jsonl", "w") as f:
+            for i, row in enumerate(old, 1):
+                if row["id"] not in golden_by_id:
+                    continue
+                new = rescore(row, golden_by_id[row["id"]])
+                rows.append(new)
+                f.write(json.dumps(new) + "\n")
+                f.flush()
+                print(f"\rre-judged {i}/{len(old)}", end="", flush=True)
+        print()
+        args.generate = True
+    with open(run_dir / "per_question.jsonl", "a") as f:
+        for config in ([] if args.rescore else CONFIGS):
             for i, example in enumerate(golden, 1):
                 row = evaluate(config, example, args.generate)
                 rows.append(row)
