@@ -14,7 +14,7 @@ Two separate judgments per entry:
     models) - the question is valid ground truth even though the historical
     reply is a proposal or a workaround.
 
-expected_sources were found by grepping the corpus for the APIs the answer
+Original expected sources were found by grepping the corpus for the APIs the answer
 names - never by running our own retriever, which would let the system under
 test choose its own ground truth.
 
@@ -39,7 +39,7 @@ GOLDEN = [
     (1294, "docs", [D + "advanced/behind-a-proxy.md"],
      "Use root_path: start Uvicorn with --root-path /api/1.0 (or pass root_path to FastAPI) so the app "
      "knows the prefix the proxy adds; the docs UI then requests the OpenAPI schema with that prefix."),
-    (3, "docs", [D + "tutorial/response-status-code.md", D + "tutorial/background-tasks.md"],
+    (3, "docs", [[D + "tutorial/response-status-code.md"], [D + "tutorial/background-tasks.md"]],
      "Set status_code=202 in the path operation decorator, and schedule the long work with a "
      "BackgroundTasks parameter (background_tasks.add_task), which runs after the response is sent."),
     (59, "docs", [D + "tutorial/background-tasks.md"],
@@ -191,18 +191,61 @@ GOLDEN = [
 ]
 
 
+# Files found relevant during a pooled review, added after the first
+# evaluation run. Every configuration's top-5 results were pooled, and each
+# unlabelled file was judged on its merits: added only if the file itself
+# answers the question (names the API or behaviour and how to use it).
+# 28 of 272 pooled (question, file) pairs qualified. release-notes.md is
+# excluded by policy - a changelog touches nearly every feature, so
+# file-level relevance for it would be meaninglessly lenient.
+# Additions extend the question's first answer facet.
+POOLED = {
+    1294: ["fastapi/applications.py"],
+    3: [D + "tutorial/path-operation-configuration.md", "fastapi/routing.py", "fastapi/applications.py"],
+    59: ["fastapi/background.py"],
+    1708: ["fastapi/param_functions.py"],
+    528: ["fastapi/applications.py", "fastapi/routing.py"],
+    1693: ["fastapi/param_functions.py"],
+    19: [D + "reference/request.md"],
+    753: ["fastapi/applications.py", "fastapi/routing.py"],
+    1821: [D + "reference/uploadfile.md", "fastapi/datastructures.py"],
+    1093: ["fastapi/dependencies/utils.py", D + "tutorial/request-files.md"],
+    1184: ["fastapi/applications.py", D + "advanced/settings.md"],
+    945: ["fastapi/param_functions.py"],
+    1650: ["fastapi/applications.py"],
+    1173: ["fastapi/applications.py"],
+    612: ["fastapi/security/oauth2.py"],
+    22: [D + "advanced/testing-websockets.md", "fastapi/routing.py", "fastapi/applications.py",
+         D + "reference/websockets.md"],
+    1544: ["fastapi/applications.py"],
+    4448: ["fastapi/exceptions.py"],
+}
+
+
+def facets(sources):
+    """A flat list is one facet (any file answers it); a list of lists is several."""
+    return [list(f) for f in sources] if isinstance(sources[0], list) else [list(sources)]
+
+
 def main():
     candidates = {c["issue"]: c for c in map(json.loads, open(CANDIDATES))}
     with open(OUT, "w") as f:
         for issue, qtype, sources, answer in GOLDEN:
             c = candidates[issue]
+            answer_facets = facets(sources)
+            added = POOLED.get(issue, [])
+            answer_facets[0] += [s for s in added if s not in answer_facets[0]]
             f.write(
                 json.dumps(
                     {
                         "id": f"gh-{issue}",
                         "question": c["question"],
                         "expected_answer": answer,
-                        "expected_sources": sources,
+                        # Each facet is one part of the answer; any file in a facet satisfies it.
+                        "answer_facets": answer_facets,
+                        # Every relevant file, for hit rate / precision / MRR.
+                        "expected_sources": sorted({s for facet in answer_facets for s in facet}),
+                        "pooled_additions": added,
                         "question_type": qtype,
                         "source_url": c["url"],
                     }
@@ -210,7 +253,9 @@ def main():
                 + "\n"
             )
     n_code = sum(1 for g in GOLDEN if g[1] == "code")
-    print(f"wrote {len(GOLDEN)} examples to {OUT}  (docs {len(GOLDEN) - n_code}, code {n_code})")
+    n_pooled = sum(len(v) for v in POOLED.values())
+    print(f"wrote {len(GOLDEN)} examples to {OUT}  (docs {len(GOLDEN) - n_code}, code {n_code}; "
+          f"{n_pooled} pooled additions across {len(POOLED)} questions)")
 
 
 if __name__ == "__main__":
