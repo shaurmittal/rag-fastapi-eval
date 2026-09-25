@@ -4,8 +4,8 @@ A question-answering system over the [FastAPI](https://github.com/fastapi/fastap
 docs that answers with citations — built around an evaluation harness that measures retrieval and
 generation separately, on 51 real questions mined from FastAPI's GitHub issues.
 
-> **Status:** retrieval evaluation complete (below). Generation metrics and judge validation are
-> implemented and pending a full evaluation run.
+> **Status:** retrieval and generation evaluation complete (below). Judge validation against
+> blind human labels is in progress.
 
 ## Findings
 
@@ -20,6 +20,14 @@ generation separately, on 51 real questions mined from FastAPI's GitHub issues.
    sections give it more to judge than windows cut mid-sentence.
 4. **Reranking costs ~15× retrieval latency** (0.97 s vs 0.06 s p50) with no demonstrable
    quality gain on this set.
+5. **Retrieval is the ceiling on answer quality.** When an expected source reached the top 5,
+   81% of answers were judged correct; when it didn't, 31% were. No generation-side metric
+   separated the four configurations: every paired interval includes zero.
+6. **The faithfulness judge is strict, by design.** About a third of extracted claims were
+   judged unsupported. Reading them, most aren't hallucinations: they're claims the context
+   *implies* (e.g. behaviour readable from a `routing.py` signature) but doesn't state, which the
+   verifier is instructed to reject. Faithfulness here is a lower bound; blind human labels
+   measure how strict.
 
 ## Retrieval results
 
@@ -45,6 +53,38 @@ Paired comparisons, one factor at a time (Δ = first minus second, 95% paired bo
 
 Full tables, including docs/code slices and latency: [`results/retrieval.md`](results/retrieval.md).
 The same run scored against first-pass labels: [`results/retrieval_first_pass_labels.md`](results/retrieval_first_pass_labels.md).
+
+## Generation results
+
+The same 51 questions × 4 configurations, answered by Claude Opus 5 from the top 5 chunks and
+judged by Claude Sonnet 5 ([how](#generation-evaluation)).
+
+| configuration | faithfulness | relevance | correctness | has citation | cited-source precision |
+|---|---|---|---|---|---|
+| naive + vector | 0.609 | 0.961 | 0.725 | 1.000 | 0.563 |
+| naive + rerank | 0.628 | 0.922 | 0.647 | 1.000 | 0.526 |
+| structured + vector | 0.677 | 0.882 | 0.686 | 1.000 | 0.541 |
+| structured + rerank | 0.641 | 0.882 | 0.686 | 0.980 | 0.594 |
+
+Correctness split by whether retrieval put an expected source in the top 5:
+
+| configuration | hit@5 = 1 | hit@5 = 0 |
+|---|---|---|
+| naive + vector | 0.79 (n=39) | 0.50 (n=12) |
+| naive + rerank | 0.77 (n=39) | 0.25 (n=12) |
+| structured + vector | 0.83 (n=36) | 0.33 (n=15) |
+| structured + rerank | 0.85 (n=39) | 0.17 (n=12) |
+
+The closest call is chunking without reranking on faithfulness (structured − naive +0.068,
+95% CI [−0.004, +0.140], 30 wins / 20 losses): suggestive, not supported. Relevance is near
+ceiling for every configuration — Opus answers the question asked — so it doesn't discriminate
+between them. Full tables with paired comparisons and the docs/code slices:
+[`results/generation.md`](results/generation.md).
+
+**Cost.** Generation and judging ran through the Message Batches API at half price: $9.00 for
+all 204 answers ($0.024 generation + $0.020 judging per answer; median 9 claims judged each).
+Batch requests have no per-request latency; a live smoke run measured 10–15 s p50 to generate
+an answer.
 
 ## Architecture
 
@@ -128,15 +168,23 @@ Implemented in [`evaluation/generation_metrics.py`](evaluation/generation_metric
 | Faithfulness | The answer is decomposed into atomic claims; each is checked against the retrieved context, and the judge must quote supporting evidence before its verdict |
 | Relevance | Does the answer address what was asked (binary) |
 | Correctness | Is its main point consistent with the reference answer (binary) |
-| Citation coverage | Share of answer blocks carrying a citation (no LLM) |
+| Has citation | Whether the answer cites any retrieved passage (no LLM) |
 | Cited-source precision | Share of citations pointing into an expected source (no LLM) |
 
 Judge design choices against known LLM-as-judge failure modes: binary verdicts only (1–5 scales
 cluster on 3–4), per-claim scoring (length can't inflate it), evidence before verdict, structured
-outputs, and a versioned prompt. Claude Opus 5 doesn't accept a temperature setting, so the judge
+outputs, and a versioned prompt. The judge is Claude Sonnet 5, a different model from the
+generator, which reduces self-preference bias. It doesn't accept a temperature setting, so it
 can't be pinned to greedy decoding; [`evaluation/judge_validation.py`](evaluation/judge_validation.py)
 measures that directly with a test-retest check, and measures agreement with blind human labels
 using Cohen's kappa (which scores an always-"yes" judge at 0, however high its raw agreement).
+
+Two judge revisions were made after reading smoke-test items, before the full run, and applied to
+every configuration: claim extraction originally pulled ~19 boilerplate claims per answer
+("FastAPI is imported from fastapi"), which measured boilerplate coverage rather than
+hallucination; and block-level citation coverage sat near 0.5 by construction (native citations
+attach to quoted passages, and connecting prose is emitted as separate uncited blocks), so it was
+replaced with `has_citation`.
 
 ## Reproduce
 
@@ -151,7 +199,8 @@ uv run python -m pipeline.index                 # embed + index (~10 min on CPU)
 uv run python -m evaluation.run_ablations       # retrieval metrics, no API key needed
 
 cp .env.example .env                            # add ANTHROPIC_API_KEY for generation
-uv run python -m evaluation.run_ablations --generate --limit 5
+uv run python -m evaluation.run_ablations --generate --limit 5   # live smoke test
+uv run python -m evaluation.batch_run                            # full run, Batch API (half price)
 uv run streamlit run app.py
 ```
 
@@ -176,7 +225,8 @@ app.py                       Streamlit demo
 
 - **n = 51.** Differences of a few points are within noise; the paired bootstrap intervals say so.
 - **File-level relevance** is lenient toward long files with many chunks.
-- **The judge is the same model family as the generator**, so self-preference bias is possible;
-  human-agreement validation is the mitigation.
+- **The judge is an LLM.** It's a different model from the generator, but shares a vendor and
+  training lineage; agreement with blind human labels is the check on it.
+- **Relevance saturates** near 1.0 and doesn't discriminate between configurations.
 - **The code-answerable slice (n=6)** is too small for conclusions.
 - **One reranker** was tested; a code-aware reranker might behave differently on source files.
