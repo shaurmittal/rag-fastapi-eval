@@ -27,12 +27,14 @@ ITEMS
 
 USAGE
     uv run python -m evaluation.judge_validation sample data/runs/<run>   # pick items
-    uv run python -m evaluation.judge_validation label                    # you label them
+    uv run python -m evaluation.judge_validation label [--claims N --answers M]  # you label them
     uv run python -m evaluation.judge_validation retest                   # judge re-scores them
     uv run python -m evaluation.judge_validation report                   # agreement + kappa
 
 Human labels are saved to data/judge_validation.jsonl, which is committed:
-they're not regenerable.
+they're not regenerable. The same file carries a second rater's labels
+(`llm_rater`, an independent blind pass by Claude Opus 5.5 over all items),
+which `report` compares alongside the human and the re-run.
 """
 
 import argparse
@@ -97,10 +99,14 @@ def ask(prompt):
             return reply
 
 
-def label():
+def label(n_claims=None, n_answers=None):
+    """Label items blind. The sample is already in random order, so limiting
+    to the first n of each kind labels a random subset."""
     items = load()
-    todo = [i for i in items if "human" not in i]
-    print(f"{len(todo)} of {len(items)} items left. The judge's verdict is hidden on purpose.\n")
+    limit = {"claim": n_claims, "correctness": n_answers}
+    subset = [i for kind in limit for i in [i for i in items if i["kind"] == kind][: limit[kind]]]
+    todo = [i for i in subset if "human" not in i]
+    print(f"{len(todo)} of {len(subset)} items left. The judge's verdict is hidden on purpose.\n")
     for n, item in enumerate(todo, 1):
         print("=" * 80, f"\n[{n}/{len(todo)}] {item['kind']}  ({item['id']})\n")
         if item["kind"] == "claim":
@@ -142,39 +148,46 @@ def retest():
     print()
 
 
+def compare(items, rater, reference="judge"):
+    """Agreement between two label fields, over the items that have both."""
+    both = [i for i in items if i.get(rater) is not None and i.get(reference) is not None]
+    if not both:
+        return
+    r = [i[rater] for i in both]
+    j = [i[reference] for i in both]
+    agree = sum(x == y for x, y in zip(r, j)) / len(r)
+    print(f"{reference} vs {rater:<10} n={len(r):<3} agreement={agree:.2f}  kappa={cohens_kappa(r, j):.2f}"
+          f"  ({rater} yes {sum(r)}/{len(r)}, {reference} yes {sum(j)}/{len(j)};"
+          f" {reference} stricter on {sum(x and not y for x, y in zip(r, j))},"
+          f" more lenient on {sum(y and not x for x, y in zip(r, j))})")
+
+
 def report():
+    # Raters: "human" is the project author, labelling blind; "llm_rater" is a
+    # second, independent LLM pass (Claude Opus 5.5), also blind to the judge.
     items = load()
     for kind in ("claim", "correctness"):
         subset = [i for i in items if i["kind"] == kind]
         print(f"\n## {kind} (n={len(subset)} sampled)")
+        compare(subset, "human")
+        compare(subset, "llm_rater")
+        compare(subset, "llm_rater", reference="human")
 
-        labelled = [i for i in subset if "human" in i]
-        if labelled:
-            h = [i["human"] for i in labelled]
-            j = [i["judge"] for i in labelled]
-            agree = sum(x == y for x, y in zip(h, j)) / len(h)
-            print(f"judge vs human   n={len(h)}  agreement={agree:.2f}  kappa={cohens_kappa(h, j):.2f}")
-            print(f"  human says yes {sum(h)}/{len(h)}, judge says yes {sum(j)}/{len(j)}")
-            print(f"  judge yes / human no (judge too lenient): {sum(y and not x for x, y in zip(h, j))}")
-            print(f"  judge no / human yes (judge too strict):  {sum(x and not y for x, y in zip(h, j))}")
-
-        retested = [i for i in subset if i.get("judge_retest") is not None]
-        if retested:
-            a = [i["judge"] for i in retested]
-            b = [i["judge_retest"] for i in retested]
-            agree = sum(x == y for x, y in zip(a, b)) / len(a)
-            print(f"judge vs itself  n={len(a)}  agreement={agree:.2f}  kappa={cohens_kappa(a, b):.2f}")
+        compare(subset, "judge_retest")
 
 
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("sample").add_argument("run_dir")
-    sub.add_parser("label")
+    label_parser = sub.add_parser("label")
+    label_parser.add_argument("--claims", type=int, help="label only the first N sampled claims")
+    label_parser.add_argument("--answers", type=int, help="label only the first N sampled answers")
     sub.add_parser("retest")
     sub.add_parser("report")
     args = parser.parse_args()
-    {"sample": lambda: sample(args.run_dir), "label": label, "retest": retest, "report": report}[args.command]()
+    {"sample": lambda: sample(args.run_dir), "label": lambda: label(args.claims, args.answers),
+     "retest": retest, "report": report}[args.command]()
 
 
 if __name__ == "__main__":

@@ -4,8 +4,7 @@ A question-answering system over the [FastAPI](https://github.com/fastapi/fastap
 docs that answers with citations — built around an evaluation harness that measures retrieval and
 generation separately, on 51 real questions mined from FastAPI's GitHub issues.
 
-> **Status:** retrieval and generation evaluation complete (below). Judge validation against
-> blind human labels is in progress.
+> **Status:** retrieval evaluation, generation evaluation and judge validation complete.
 
 ## Findings
 
@@ -23,11 +22,12 @@ generation separately, on 51 real questions mined from FastAPI's GitHub issues.
 5. **Retrieval is the ceiling on answer quality.** When an expected source reached the top 5,
    81% of answers were judged correct; when it didn't, 31% were. No generation-side metric
    separated the four configurations: every paired interval includes zero.
-6. **The faithfulness judge is strict, by design.** About a third of extracted claims were
-   judged unsupported. Reading them, most aren't hallucinations: they're claims the context
-   *implies* (e.g. behaviour readable from a `routing.py` signature) but doesn't state, which the
-   verifier is instructed to reject. Faithfulness here is a lower bound; blind human labels
-   measure how strict.
+6. **Faithfulness measures "stated in the context", not "true".** About a third of extracted
+   claims were judged unsupported. Reading them, most aren't inventions: they're claims the
+   context *implies* (e.g. behaviour readable from a `routing.py` signature) but doesn't state,
+   which the verifier is instructed to reject. That's the rule working as specified, not a
+   miscalibrated judge: independent raters applying the same rule agreed with the judge on
+   95% of sampled claims ([validation](#judge-validation)).
 
 ## Retrieval results
 
@@ -186,6 +186,29 @@ hallucination; and block-level citation coverage sat near 0.5 by construction (n
 attach to quoted passages, and connecting prose is emitted as separate uncited blocks), so it was
 replaced with `has_citation`.
 
+## Judge validation
+
+A fixed random sample of 60 claim verdicts and 30 correctness verdicts from the full run was
+re-labelled blind — raters never saw the judge's verdict.
+
+| comparison | claims: agreement / κ | correctness: agreement / κ |
+|---|---|---|
+| judge vs human (random subset, n = 12 / 8) | 0.67 / 0.14 | 1.00 / 1.00 |
+| judge vs independent LLM rater (n = 60 / 30) | 0.95 / 0.89 | 0.97 / 0.91 |
+| human vs LLM rater (n = 12 / 8) | 0.75 / 0.40 | 1.00 / 1.00 |
+| judge vs itself, re-run (n = 60 / 30) | 0.95 / 0.89 | 1.00 / 1.00 |
+
+- **Correctness verdicts are reliable**: every rater agreed with the judge on all but one item,
+  and the judge reproduced every verdict on a re-run.
+- **Claim verdicts are stable** (κ 0.89 test-retest) and match an independent rater, but the
+  human subset disagreed on 4 of 12 claims — 3 where the judge accepted a claim the human
+  rejected. Twelve items can't pin κ down (one flipped label moves it by ~0.2), so the
+  human-agreement figure for claims is inconclusive rather than negative.
+- **The LLM rater is Claude Opus 5.5**: a different model from the judge, but the same vendor
+  and lineage, so its agreement is weaker evidence than human agreement. Its labels and the
+  human labels are both in [`data/judge_validation.jsonl`](data/judge_validation.jsonl);
+  full output in [`results/judge_validation.md`](results/judge_validation.md).
+
 ## Reproduce
 
 Requires [uv](https://docs.astral.sh/uv/) and Docker.
@@ -225,8 +248,9 @@ app.py                       Streamlit demo
 
 - **n = 51.** Differences of a few points are within noise; the paired bootstrap intervals say so.
 - **File-level relevance** is lenient toward long files with many chunks.
-- **The judge is an LLM.** It's a different model from the generator, but shares a vendor and
-  training lineage; agreement with blind human labels is the check on it.
+- **The judge is an LLM, and human validation is small.** The judge is a different model from
+  the generator but shares its vendor; the blind human check covers 20 items, and the larger
+  second-rater check (90 items) is itself an LLM.
 - **Relevance saturates** near 1.0 and doesn't discriminate between configurations.
 - **The code-answerable slice (n=6)** is too small for conclusions.
 - **One reranker** was tested; a code-aware reranker might behave differently on source files.
