@@ -4,6 +4,8 @@ A question-answering system over the [FastAPI](https://github.com/fastapi/fastap
 docs that answers with citations — built around an evaluation harness that measures retrieval and
 generation separately, on 51 real questions mined from FastAPI's GitHub issues.
 
+**Live demo:** [rag-fastapi-eval.streamlit.app](https://rag-fastapi-eval-ucfzndxrqengdrxwzmgny3.streamlit.app/)
+
 > **Status:** retrieval evaluation, generation evaluation and judge validation complete.
 
 ## Findings
