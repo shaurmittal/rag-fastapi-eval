@@ -193,17 +193,19 @@ re-labelled blind — raters never saw the judge's verdict.
 
 | comparison | claims: agreement / κ | correctness: agreement / κ |
 |---|---|---|
-| judge vs human (random subset, n = 12 / 8) | 0.67 / 0.14 | 1.00 / 1.00 |
+| judge vs human (random subset, n = 12 / 8) | 0.75 / 0.25 | 1.00 / 1.00 |
 | judge vs independent LLM rater (n = 60 / 30) | 0.95 / 0.89 | 0.97 / 0.91 |
-| human vs LLM rater (n = 12 / 8) | 0.75 / 0.40 | 1.00 / 1.00 |
+| human vs LLM rater (n = 12 / 8) | 0.83 / 0.56 | 1.00 / 1.00 |
 | judge vs itself, re-run (n = 60 / 30) | 0.95 / 0.89 | 1.00 / 1.00 |
 
 - **Correctness verdicts are reliable**: every rater agreed with the judge on all but one item,
   and the judge reproduced every verdict on a re-run.
 - **Claim verdicts are stable** (κ 0.89 test-retest) and match an independent rater, but the
-  human subset disagreed on 4 of 12 claims — 3 where the judge accepted a claim the human
-  rejected. Twelve items can't pin κ down (one flipped label moves it by ~0.2), so the
-  human-agreement figure for claims is inconclusive rather than negative.
+  human subset disagreed on 3 of 12 claims — 2 where the judge accepted a claim the human
+  rejected. Twelve items can't pin κ down (one flipped label moves it by ~0.1–0.2), so the
+  human-agreement figure for claims is inconclusive rather than negative. One human label was
+  corrected on re-review after unblinding (its supporting sentence is quoted near-verbatim in
+  the context); the first-pass figures were 0.67 / κ 0.14.
 - **The LLM rater is Claude Opus 5.5**: a different model from the judge, but the same vendor
   and lineage, so its agreement is weaker evidence than human agreement. Its labels and the
   human labels are both in [`data/judge_validation.jsonl`](data/judge_validation.jsonl);
